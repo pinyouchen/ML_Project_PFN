@@ -67,115 +67,56 @@ class ModelTrainer:
         return sampler_type, sampling_ratio, k
 
     def build_models(self):
-        scale_weight = int(self.ratio * 1.0)
+        # --- 只保留 TabPFN 與 EBM ---
         
-        if self.strategy == 'aggressive':
-            n_est = 700; depth = 25; lr = 0.03; base_weight_mult = 2.0
-        elif self.strategy == 'moderate':
-            n_est = 500; depth = 18; lr = 0.05; base_weight_mult = 1.5
-        else:
-            n_est = 400; depth = 12; lr = 0.08; base_weight_mult = 1.2
-
-        if self.label_name == 'MDD': weight_mult = 2.0
-        elif self.label_name == 'Panic': weight_mult = 1.8
-        elif self.label_name == 'GAD': weight_mult = 1.2
-        else: weight_mult = base_weight_mult
-
-        final_weight = max(1, int(scale_weight * weight_mult))
-
-        # 1. XGBoost
-        if self.label_name == 'Panic':
-            self.models['XGB'] = xgb.XGBClassifier(
-                n_estimators=650, max_depth=18, learning_rate=0.035,
-                scale_pos_weight=final_weight, subsample=0.75, colsample_bytree=0.75,
-                gamma=0.2, min_child_weight=1, reg_alpha=0.08, reg_lambda=0.6,
-                random_state=42, n_jobs=-1, verbosity=0
-            )
-        else:
-            self.models['XGB'] = xgb.XGBClassifier(
-                n_estimators=n_est, max_depth=int(depth * 0.4), learning_rate=lr,
-                scale_pos_weight=final_weight, subsample=0.8, colsample_bytree=0.8,
-                gamma=0.2, min_child_weight=2, reg_alpha=0.1, reg_lambda=1.0,
-                random_state=42, n_jobs=-1, verbosity=0
-            )
-
-        # 2. LightGBM
-        self.models['LGBM'] = lgb.LGBMClassifier(
-            n_estimators=n_est, max_depth=int(depth * 0.4), learning_rate=lr,
-            num_leaves=int(depth * 1.5), class_weight={0: 1, 1: final_weight},
-            subsample=0.8, colsample_bytree=0.8, min_child_samples=8,
-            reg_alpha=0.1, reg_lambda=1.0, random_state=42, n_jobs=-1, verbose=-1
-        )
-
-        # 3. Random Forest
-        self.models['RF'] = RandomForestClassifier(
-            n_estimators=n_est, max_depth=depth, min_samples_split=8, min_samples_leaf=4,
-            class_weight={0: 1, 1: final_weight}, random_state=42, n_jobs=-1
-        )
-
-        # 4. Extra Trees
-        self.models['ET'] = ExtraTreesClassifier(
-            n_estimators=n_est, max_depth=depth, min_samples_split=8, min_samples_leaf=4,
-            class_weight={0: 1, 1: final_weight}, random_state=42, n_jobs=-1
-        )
-
-        # 5. Gradient Boosting
-        self.models['GB'] = GradientBoostingClassifier(
-            n_estimators=int(n_est * 0.6), max_depth=int(depth * 0.3),
-            learning_rate=lr, subsample=0.8, min_samples_split=8, random_state=42
-        )
-
-        # 6. Balanced RF
-        self.models['BalancedRF'] = BalancedRandomForestClassifier(
-            n_estimators=int(n_est * 0.8), max_depth=depth, min_samples_split=8,
-            min_samples_leaf=4, random_state=42, n_jobs=-1
-        )
-
-        # --- 新增模型：TabPFN ---
+        # 1. TabPFN (若有安裝)
         if _HAS_TABPFN:
-            # 修正：移除 N_ensemble_configurations，使用預設值
-            # 加上 try-except 嘗試設定 device，避免部分版本報錯
+            # CPU 模式（如之前設定）
+            print(f"   🚀 TabPFN using device: CPU")
             try:
                 self.models['TabPFN'] = TabPFNClassifier(device='cpu')
             except TypeError:
-                # 萬一連 device 參數都不支援 (極少見)，就全用預設
                 self.models['TabPFN'] = TabPFNClassifier()
+        else:
+            print("   ⚠️ TabPFN 未安裝，跳過。")
 
-        # --- 新增模型：EBM ---
+        # 2. EBM (若有安裝)
         if _HAS_EBM:
+            # interactions=0 加速訓練，可視需求調整
             self.models['EBM'] = ExplainableBoostingClassifier(
                 random_state=42, n_jobs=-1, interactions=0, outer_bags=8
             )
+        else:
+            print("   ⚠️ EBM 未安裝，跳過。")
+
+        if not self.models:
+            print("   ❌ 警告：沒有任何模型被建立！請檢查套件安裝。")
 
     def _fit_single_model(self, name, model, X_resampled, y_resampled):
-        is_xgb = isinstance(model, xgb.XGBClassifier)
-        is_lgbm = isinstance(model, lgb.LGBMClassifier)
-        
-        use_early_stop = (is_xgb or is_lgbm) and (self.label_name in ['Panic', 'MDD'])
-        
-        if use_early_stop:
-            early_stop_rounds = 20; val_split_ratio = 0.20
-            sss = StratifiedShuffleSplit(n_splits=1, test_size=val_split_ratio, random_state=42)
-            train_sub_idx, val_sub_idx = next(sss.split(X_resampled, y_resampled))
-            X_tr_sub = X_resampled.iloc[train_sub_idx]; y_tr_sub = y_resampled.iloc[train_sub_idx]
-            X_val_sub = X_resampled.iloc[val_sub_idx]; y_val_sub = y_resampled.iloc[val_sub_idx]
-            try:
-                if is_xgb:
-                    model.fit(X_tr_sub, y_tr_sub, eval_set=[(X_val_sub, y_val_sub)], early_stopping_rounds=early_stop_rounds, verbose=False)
-                elif is_lgbm:
-                    model.fit(X_tr_sub, y_tr_sub, eval_set=[(X_val_sub, y_val_sub)], eval_metric='binary_logloss', callbacks=[lgb.early_stopping(early_stop_rounds, verbose=False)])
-            except TypeError:
-                model.fit(X_resampled, y_resampled)
-        else:
-            # TabPFN 特殊處理
-            if name == 'TabPFN':
-                # 嘗試使用 overwrite_warning，如果不支援則直接 fit
-                try:
-                    model.fit(X_resampled, y_resampled, overwrite_warning=True)
-                except TypeError:
-                    model.fit(X_resampled, y_resampled)
+        # TabPFN 特殊處理：強制轉換型態為 float32
+        if name == 'TabPFN':
+            # 1. 確保數據是 Numpy Array
+            if hasattr(X_resampled, 'values'):
+                X_final = X_resampled.values
             else:
-                model.fit(X_resampled, y_resampled)
+                X_final = X_resampled
+            
+            if hasattr(y_resampled, 'values'):
+                y_final = y_resampled.values
+            else:
+                y_final = y_resampled
+
+            # 2. 強制轉換
+            X_final = np.array(X_final, dtype=np.float32)
+            y_final = np.array(y_final, dtype=int)
+
+            try:
+                model.fit(X_final, y_final, overwrite_warning=True)
+            except TypeError:
+                model.fit(X_final, y_final)
+        else:
+            # EBM 或其他
+            model.fit(X_resampled, y_resampled)
                 
         return model
 
@@ -222,7 +163,14 @@ class ModelTrainer:
                 fitted_model = self._fit_single_model(name, model, X_resampled, y_resampled)
                 self.fitted_models[name] = fitted_model
                 
-                y_pred_proba = fitted_model.predict_proba(X_test)[:, 1]
+                # TabPFN 需要乾淨的 Numpy 輸入進行預測
+                if name == 'TabPFN':
+                    X_test_final = X_test.values if hasattr(X_test, 'values') else X_test
+                    X_test_final = np.array(X_test_final, dtype=np.float32)
+                    y_pred_proba = fitted_model.predict_proba(X_test_final)[:, 1]
+                else:
+                    y_pred_proba = fitted_model.predict_proba(X_test)[:, 1]
+
                 best_thresh, _ = self._optimize_threshold_precision_first(y_test, y_pred_proba)
                 y_pred = (y_pred_proba >= best_thresh).astype(int)
 
@@ -253,11 +201,12 @@ class ModelTrainer:
         try:
             predictions, weights = [], []
             for name, r in self.results.items():
-                if name == 'TabPFN': weight = r['f1_score'] * 1.2
-                elif name == 'EBM': weight = r['f1_score'] * 1.0
-                elif self.label_name == 'Panic': weight = 0.5 * r['f1_score'] + 0.5 * r['precision']
-                elif self.label_name == 'MDD': weight = 0.4 * r['f1_score'] + 0.6 * r['recall']
-                else: weight = r['f1_score'] * (0.5 + 0.5 * r['precision'])
+                if name == 'TabPFN': 
+                    weight = r['f1_score'] * 1.2 # TabPFN 權重稍高
+                elif name == 'EBM': 
+                    weight = r['f1_score'] * 1.0 # EBM 標準權重
+                else:
+                    weight = r['f1_score'] # 預設 (雖然現在只剩這兩個)
                 
                 predictions.append(r['y_pred_proba'])
                 weights.append(max(weight, 0.01))

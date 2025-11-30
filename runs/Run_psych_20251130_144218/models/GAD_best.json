@@ -1,0 +1,50 @@
+{
+  "label": "GAD",
+  "threshold": 0.3343434343434344,
+  "feature_columns": [
+    "Age",
+    "Sex",
+    "BMI",
+    "phq15",
+    "haq21",
+    "cabah",
+    "bdi",
+    "bai"
+  ],
+  "outlier_bounds": {
+    "phq15": [
+      -24.0,
+      39.0
+    ],
+    "haq21": [
+      -45.0,
+      81.0
+    ],
+    "cabah": [
+      -8.25,
+      123.0
+    ],
+    "bdi": [
+      -41.0,
+      64.0
+    ],
+    "bai": [
+      -46.0,
+      66.0
+    ],
+    "Age": [
+      -17.0,
+      105.5
+    ],
+    "BMI": [
+      4.08127231318338,
+      42.35427067860728
+    ]
+  },
+  "best_fold": 5,
+  "files": {
+    "model": "GAD_best.joblib",
+    "scaler": "GAD_best_scaler.joblib",
+    "imputer": "GAD_best_imputer.joblib"
+  }
+}
